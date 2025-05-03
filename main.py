@@ -13,7 +13,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For dev; restrict later
+    allow_origins=["*"],  # For development; restrict in prod
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -21,38 +21,48 @@ app.add_middleware(
 
 VECTOR_PATH = "vectorstore.pkl"
 
+@app.get("/")
+def read_root():
+    return {"message": "LangChain chatbot API is live 🎉"}
+
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
-    file_path = f"/tmp/{file.filename}"
-    with open(file_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    try:
+        file_path = f"/tmp/{file.filename}"
+        with open(file_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
 
-    loader = PyPDFLoader(file_path)
-    docs = loader.load_and_split()
-    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-    vectorstore = FAISS.from_documents(docs, embeddings)
+        loader = PyPDFLoader(file_path)
+        docs = loader.load_and_split()
 
-    with open(VECTOR_PATH, "wb") as f:
-        pickle.dump(vectorstore, f)
+        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        vectorstore = FAISS.from_documents(docs, embeddings)
 
-    return {"message": "Vectorstore created from PDF"}
+        with open(VECTOR_PATH, "wb") as f:
+            pickle.dump(vectorstore, f)
+
+        return {"message": "Vectorstore created from PDF"}
+    
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.post("/ask")
 async def ask_question(question: str = Form(...)):
-    if not os.path.exists(VECTOR_PATH):
-        return JSONResponse(status_code=400, content={"error": "No vectorstore found"})
+    try:
+        if not os.path.exists(VECTOR_PATH):
+            return JSONResponse(status_code=400, content={"error": "Vectorstore not found. Please upload a PDF first."})
 
-    with open(VECTOR_PATH, "rb") as f:
-        vectorstore = pickle.load(f)
+        with open(VECTOR_PATH, "rb") as f:
+            vectorstore = pickle.load(f)
 
-    llm = ChatOpenAI(
-        model="llama3-8b-8192",
-        openai_api_base="https://api.groq.com/openai/v1",
-        openai_api_key=os.environ.get("GROQ_API_KEY")
-    )
+        retriever = vectorstore.as_retriever()
+        memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+        llm = ChatOpenAI(model_name="gpt-3.5-turbo")
 
-    memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-    chain = ConversationalRetrievalChain.from_llm(llm, vectorstore.as_retriever(), memory)
-    answer = chain.run(question)
+        chain = ConversationalRetrievalChain.from_llm(llm=llm, retriever=retriever, memory=memory)
 
-    return {"answer": answer}
+        result = chain.run(question)
+        return {"answer": result}
+    
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
